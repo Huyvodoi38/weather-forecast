@@ -2,3 +2,4 @@ streamlit
 pandas
 matplotlib 
 plotly
+google-cloud-bigquery==3.33.0

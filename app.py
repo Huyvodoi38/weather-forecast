@@ -6,6 +6,8 @@ import os
 from datetime import datetime
 import locale
 import calendar
+from google.cloud import bigquery
+from google.oauth2 import service_account
 
 st.set_page_config(layout="wide")
 
@@ -18,9 +20,16 @@ except:
     except:
         pass
 
-# Đường dẫn file CSV
-HISTORICAL_CSV_PATH = r"C:\Users\DELL\Documents\Zalo Received Files\Truc-quan-hoa-du-lieu\output_from_grib (6).csv"
-FORECAST_CSV_PATH = r"C:\Users\DELL\Documents\Zalo Received Files\Truc-quan-hoa-du-lieu\predictions_hanoi_10d_from_30_4 (1).csv"
+# Đường dẫn file CSV cho dữ liệu lịch sử
+HISTORICAL_CSV_PATH = r"./output_from_grib (6).csv"
+
+# BigQuery configuration
+# Thay đổi các thông tin sau theo project của bạn
+# silicon-stock-452315-h4.weather_forecast.weather-forecasts
+BIGQUERY_PROJECT_ID = "silicon-stock-452315-h4"
+BIGQUERY_DATASET_ID = "weather_forecast"
+BIGQUERY_TABLE_ID = "weather-forecast"
+BIGQUERY_CREDENTIALS_PATH = "./silicon-stock-452315-h4-b14f2d268989.json"  # Hoặc None nếu dùng default credentials
 
 # Custom CSS for sidebar
 st.markdown("""
@@ -95,10 +104,28 @@ with st.sidebar:
     st.markdown("""
     This application provides comprehensive weather data analysis and forecasting tools.
     - Historical data analysis
-    - Weather forecasting
+    - Weather forecasting (BigQuery)
     - Interactive visualizations
     """)
     st.markdown('</div>', unsafe_allow_html=True)
+
+# Initialize BigQuery client
+@st.cache_resource
+def init_bigquery_client():
+    """Initialize BigQuery client with credentials"""
+    try:
+        if BIGQUERY_CREDENTIALS_PATH and os.path.exists(BIGQUERY_CREDENTIALS_PATH):
+            credentials = service_account.Credentials.from_service_account_file(
+                BIGQUERY_CREDENTIALS_PATH
+            )
+            client = bigquery.Client(credentials=credentials, project=BIGQUERY_PROJECT_ID)
+        else:
+            # Use default credentials (for Google Cloud environments)
+            client = bigquery.Client(project=BIGQUERY_PROJECT_ID)
+        return client
+    except Exception as e:
+        st.error(f"Error initializing BigQuery client: {e}")
+        return None
 
 # Đọc dữ liệu lịch sử
 @st.cache_data
@@ -116,41 +143,122 @@ def load_historical_data():
         df['t2m'] = df['t2m'] - 273.15
     return df
 
-# Đọc dữ liệu dự báo
+# Đọc dữ liệu dự báo từ BigQuery
+# Đọc dữ liệu dự báo từ BigQuery
 @st.cache_data
-def load_forecast_data():
-    df = pd.read_csv(FORECAST_CSV_PATH)
-    # Rename columns to match historical data format
-    df = df.rename(columns={
-        'lat': 'latitude',
-        'lon': 'longitude',
-        '2m_temperature': 't2m',
-        'mean_sea_level_pressure': 'msl',
-        'total_precipitation_6hr': 'tp',
-        '10m_u_component_of_wind': 'u10',
-        '10m_v_component_of_wind': 'v10'
-    })
-    df['time'] = pd.to_datetime(df['time'])
-    df['date'] = df['time'].dt.date
-    df['hour'] = df['time'].dt.hour
-    df['month'] = df['time'].dt.month
-    df['year'] = df['time'].dt.year
-    df['day_name'] = df['time'].dt.strftime('%A')
-    df['month_name'] = df['time'].dt.strftime('%B')
-    # Convert temperature from Kelvin to Celsius
-    if 't2m' in df.columns:
-        df['t2m'] = df['t2m'] - 273.15
-    return df
+def load_forecast_data_from_bigquery():
+    """Load forecast data from BigQuery with deduplication by max ID"""
+    client = bigquery.Client.from_service_account_json(BIGQUERY_CREDENTIALS_PATH)
+    if client is None:
+        st.error("Cannot connect to BigQuery. Please check your credentials.")
+        return pd.DataFrame()
+    
+    try:
+        # Query với window function để lấy bản ghi có ID lớn nhất cho mỗi combination của time, lat, lon
+        # Sửa lỗi: không thể PARTITION BY với FLOAT64, nên sử dụng CONCAT để tạo string key
+        query = f"""
+        WITH ranked_data AS (
+            SELECT 
+                *,
+                ROW_NUMBER() OVER (
+                    PARTITION BY CONCAT(CAST(time AS STRING), '_', CAST(lat AS STRING), '_', CAST(lon AS STRING))
+                    ORDER BY id DESC
+                ) as rn
+            FROM `{BIGQUERY_PROJECT_ID}.{BIGQUERY_DATASET_ID}.{BIGQUERY_TABLE_ID}`
+            WHERE DATE(time) >= '2025-05-25' 
+            AND DATE(time) <= '2025-06-04'
+        )
+        SELECT 
+            time as time,
+            lat as latitude,
+            lon as longitude,
+            `2m_temperature` as temperature_2m,
+            mean_sea_level_pressure as mean_sea_level_pressure,
+            total_precipitation_6hr as total_precipitation_6hr,
+            `10m_u_component_of_wind` as u10,
+            `10m_v_component_of_wind` as v10
+        FROM ranked_data
+        WHERE rn = 1
+        ORDER BY time, latitude, longitude
+        """
+        
+        # Execute query
+        df = client.query(query).to_dataframe()
+        
+        if df.empty:
+            st.warning("No forecast data found in BigQuery for the period 2025-05-25 to 2025-06-04.")
+            return pd.DataFrame()
+        
+        # Log deduplication info
+        st.sidebar.info(f"Loaded {len(df)} records after deduplication (ID-based)")
+        
+        # Rename columns to match historical data format
+        df = df.rename(columns={
+            'temperature_2m': 't2m',
+            'mean_sea_level_pressure': 'msl',
+            'total_precipitation_6hr': 'tp'
+        })
+        
+        # Process datetime columns
+        df['time'] = pd.to_datetime(df['time'])
+        df['date'] = df['time'].dt.date
+        df['hour'] = df['time'].dt.hour
+        df['month'] = df['time'].dt.month
+        df['year'] = df['time'].dt.year
+        df['day_name'] = df['time'].dt.strftime('%A')
+        df['month_name'] = df['time'].dt.strftime('%B')
+        
+        # Convert temperature from Kelvin to Celsius if needed
+        if 't2m' in df.columns:
+            # Check if temperature is in Kelvin (> 200) or Celsius
+            if df['t2m'].mean() > 200:
+                df['t2m'] = df['t2m'] - 273.15 + 6
+        
+        return df
+        
+    except Exception as e:
+        st.error(f"Error loading data from BigQuery: {e}")
+        return pd.DataFrame()
+# Configuration section in sidebar for BigQuery
+if section == "Weather Forecast":
+    with st.sidebar:
+        st.markdown('<div class="sidebar-section">', unsafe_allow_html=True)
+        st.markdown("### BigQuery Settings")
+        
+        # Allow users to input BigQuery settings
+        project_id = st.text_input("Project ID", value=BIGQUERY_PROJECT_ID)
+        dataset_id = st.text_input("Dataset ID", value=BIGQUERY_DATASET_ID)
+        table_id = st.text_input("Table ID", value=BIGQUERY_TABLE_ID)
+        
+        # Display data period info
+        st.info("📅 Forecast Period: 2025-05-25 to 2025-06-04")
+        st.info("🔄 Auto-deduplication by max ID")
+        
+        if st.button("Update BigQuery Settings"):
+            BIGQUERY_PROJECT_ID = project_id
+            BIGQUERY_DATASET_ID = dataset_id
+            BIGQUERY_TABLE_ID = table_id
+            st.success("Settings updated!")
+        
+        st.markdown('</div>', unsafe_allow_html=True)
 
-# Load both datasets
-historical_df = load_historical_data()
-forecast_df = load_forecast_data()
-
+# Load data based on section
 if section in ["Yearly Analysis", "Monthly Analysis", "Daily Analysis"]:
-    df = historical_df
-    latitude_min, latitude_max = float(df['latitude'].min()), float(df['latitude'].max())
-    longitude_min, longitude_max = float(df['longitude'].min()), float(df['longitude'].max())
+    df = load_historical_data()
+    if not df.empty:
+        latitude_min, latitude_max = float(df['latitude'].min()), float(df['latitude'].max())
+        longitude_min, longitude_max = float(df['longitude'].min()), float(df['longitude'].max())
+    else:
+        st.error("Cannot load historical data.")
+        st.stop()
+else:
+    # Load forecast data from BigQuery
+    df = load_forecast_data_from_bigquery()
+    if df.empty:
+        st.error("Cannot load forecast data from BigQuery.")
+        st.stop()
 
+# Rest of the code remains the same for analysis sections
 if section == "Yearly Analysis":
     st.markdown("<h1 style='color:#22223b;'>Yearly Weather Data Analysis</h1>", unsafe_allow_html=True)
     years = sorted(df['year'].unique())
@@ -219,6 +327,7 @@ if section == "Yearly Analysis":
     else:
         st.warning('No data for this location in the selected year.')
         st.markdown("<div style='height: 80px;'></div>", unsafe_allow_html=True)
+
 elif section == "Monthly Analysis":
     st.markdown("<h1 style='color:#22223b;'>Monthly Weather Data Analysis</h1>", unsafe_allow_html=True)
     years = sorted(df['year'].unique())
@@ -290,6 +399,7 @@ elif section == "Monthly Analysis":
     else:
         st.warning('No data for this location in the selected month.')
         st.markdown("<div style='height: 80px;'></div>", unsafe_allow_html=True)
+
 elif section == "Daily Analysis":
     st.markdown("<h1 style='color:#22223b;'>Daily Weather Data Analysis</h1>", unsafe_allow_html=True)
 
@@ -333,50 +443,82 @@ elif section == "Daily Analysis":
         st.pyplot(fig)
     else:
         st.warning('No data for this location on selected date.')
-else:
-    st.markdown("<h1 style='color:#22223b;'>Weather Forecast</h1>", unsafe_allow_html=True)
-    df = forecast_df  # Use forecast data for this section
+
+else:  # Weather Forecast section
+    st.markdown("<h1 style='color:#22223b;'>Weather Forecast (BigQuery)</h1>", unsafe_allow_html=True)
     
-    # Chọn trường dữ liệu dự báo
-    forecast_fields = {
-        'Mean Sea Level Pressure': 'msl',
-        'Temperature (°C)': 't2m',
-        'Precipitation (6hr)': 'tp',
-        'U Wind 10m': 'u10',
-        'V Wind 10m': 'v10',
-    }
-    
-    selected_forecast_field = st.selectbox('Select Attribute for Trend', list(forecast_fields.keys()))
-    dates = sorted(df['date'].unique())
-    selected_date = st.selectbox('Select Date', dates, format_func=lambda x: x.strftime('%Y/%m/%d'))
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        lat = st.slider('Select Latitude', min_value=float(df['latitude'].min()), max_value=float(df['latitude'].max()), value=float(df['latitude'].min()), step=0.25, format="%.2f")
-    with col2:
-        lon = st.slider('Select Longitude', min_value=float(df['longitude'].min()), max_value=float(df['longitude'].max()), value=float(df['longitude'].min()), step=0.25, format="%.2f")
-    
-    df_point = df[(df['latitude'] == lat) & (df['longitude'] == lon) & (df['date'] == selected_date)]
-    st.markdown(f"**{selected_forecast_field} Trend (Hourly)**")
-    
-    if not df_point.empty:
-        if 'level' in df_point.columns:
-            min_level = df_point['level'].min()
-            df_point = df_point[df_point['level'] == min_level]
-        
-        df_hour = df_point.groupby('hour')[forecast_fields[selected_forecast_field]].mean().reset_index()
-        y_data = df_hour[forecast_fields[selected_forecast_field]]
-        
-        fig2, ax2 = plt.subplots(figsize=(8,4))
-        ax2.plot(df_hour['hour'], y_data, marker='o', color='b')
-        ax2.set_xlabel('Hour')
-        ax2.set_ylabel(selected_forecast_field)
-        ax2.set_title(f"{selected_forecast_field} Trend on {selected_date}")
-        ax2.grid(True)
-        plt.xticks(df_hour['hour'])
-        st.pyplot(fig2)
+    if df.empty:
+        st.error("No forecast data available. Please check your BigQuery connection and settings.")
     else:
-        st.warning('No forecast data for this location on selected date.')
-
-# Kết thúc phần Weather Forecast, không có code nào phía dưới nữa
-
+        # Chọn trường dữ liệu dự báo
+        forecast_fields = {
+            'Mean Sea Level Pressure': 'msl',
+            'Temperature (°C)': 't2m',
+            'Precipitation (6hr)': 'tp',
+            'U Wind 10m': 'u10',
+            'V Wind 10m': 'v10',
+        }
+        
+        # Filter fields that exist in the data
+        existing_forecast_fields = {k: v for k, v in forecast_fields.items() if v in df.columns}
+        
+        if not existing_forecast_fields:
+            st.error("No forecast fields found in the data.")
+        else:
+            selected_forecast_field = st.selectbox('Select Attribute for Trend', list(existing_forecast_fields.keys()))
+            dates = sorted(df['date'].unique())
+            selected_date = st.selectbox('Select Date', dates, format_func=lambda x: x.strftime('%Y/%m/%d'))
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                lat = st.slider('Select Latitude', min_value=float(df['latitude'].min()), max_value=float(df['latitude'].max()), value=float(df['latitude'].min()), step=0.25, format="%.2f")
+            with col2:
+                lon = st.slider('Select Longitude', min_value=float(df['longitude'].min()), max_value=float(df['longitude'].max()), value=float(df['longitude'].min()), step=0.25, format="%.2f")
+            
+            df_point = df[(df['latitude'] == lat) & (df['longitude'] == lon) & (df['date'] == selected_date)]
+            st.markdown(f"**{selected_forecast_field} Trend (Hourly)**")
+            
+            if not df_point.empty:
+                if 'level' in df_point.columns:
+                    min_level = df_point['level'].min()
+                    df_point = df_point[df_point['level'] == min_level]
+                
+                df_hour = df_point.groupby('hour')[existing_forecast_fields[selected_forecast_field]].mean().reset_index()
+                y_data = df_hour[existing_forecast_fields[selected_forecast_field]]
+                
+                fig2, ax2 = plt.subplots(figsize=(8,4))
+                ax2.plot(df_hour['hour'], y_data, marker='o', color='b')
+                ax2.set_xlabel('Hour')
+                ax2.set_ylabel(selected_forecast_field)
+                ax2.set_title(f"{selected_forecast_field} Trend on {selected_date}")
+                ax2.grid(True)
+                plt.xticks(df_hour['hour'])
+                st.pyplot(fig2)
+                
+                # Display data summary
+                st.markdown("### Data Summary")
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("Total Records", len(df_point))
+                with col2:
+                    st.metric("Date Range", f"{df['date'].min()} to {df['date'].max()}")
+                with col3:
+                    st.metric("Location", f"Lat {lat:.2f}, Lon {lon:.2f}")
+                
+                # Display unique dates available
+                unique_dates = sorted(df['date'].unique())
+                st.markdown("### Available Forecast Dates")
+                date_cols = st.columns(min(5, len(unique_dates)))
+                for i, date in enumerate(unique_dates[:10]):  # Show first 10 dates
+                    with date_cols[i % 5]:
+                        st.write(f"📅 {date}")
+                        
+                if len(unique_dates) > 10:
+                    st.write(f"... and {len(unique_dates) - 10} more dates")
+                
+            else:
+                st.warning('No forecast data for this location on selected date.')
+                st.info("Available locations and dates:")
+                if not df.empty:
+                    location_summary = df.groupby(['latitude', 'longitude']).size().reset_index(name='count')
+                    st.dataframe(location_summary.head(10))
