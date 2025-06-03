@@ -29,7 +29,7 @@ HISTORICAL_CSV_PATH = r"./output_from_grib (6).csv"
 BIGQUERY_PROJECT_ID = "silicon-stock-452315-h4"
 BIGQUERY_DATASET_ID = "weather_forecast"
 BIGQUERY_TABLE_ID = "weather-forecast"
-BIGQUERY_CREDENTIALS_PATH = "./silicon-stock-452315-h4-b14f2d268989.json"  # Hoặc None nếu dùng default credentials
+BIGQUERY_CREDENTIALS_PATH = "./silicon-stock-452315-h4-7d9ea6110a14.json"  
 
 # Custom CSS for sidebar
 st.markdown("""
@@ -300,7 +300,7 @@ if section == "Yearly Analysis":
             ax1.legend(loc='upper left')
             ax2.legend(loc='upper right')
             plt.title('Temperature and Rainfall Analysis by Month')
-            st.pyplot(fig)
+            st.pyplot(fig, use_container_width=False)
         with col2:
             pie_data = month_stats[month_stats['total_precip'] > 0]
             if not pie_data.empty:
@@ -320,7 +320,7 @@ if section == "Yearly Analysis":
                 )
                 ax3.legend(wedges, months, title="Month", loc="center left", bbox_to_anchor=(1, 0.5), fontsize=11)
                 ax3.set_title('Rainfall Distribution by Month', fontsize=14, weight='bold')
-                st.pyplot(fig2)
+                st.pyplot(fig2, use_container_width=False)
             else:
                 st.info('No rainfall data for this year at the selected location.')
         st.markdown("<div style='height: 80px;'></div>", unsafe_allow_html=True)
@@ -369,7 +369,7 @@ elif section == "Monthly Analysis":
             ax1.legend(loc='upper left')
             ax2.legend(loc='upper right')
             plt.title('Temperature and Rainfall Analysis')
-            st.pyplot(fig)
+            st.pyplot(fig, use_container_width=False)
         with col2:
             pie_data = daily_stats[daily_stats['total_precip'] > 0]
             if not pie_data.empty:
@@ -391,7 +391,7 @@ elif section == "Monthly Analysis":
                 # Thêm legend bên cạnh
                 ax3.legend(wedges, dates, title="Date", loc="center left", bbox_to_anchor=(1, 0.5), fontsize=11)
                 ax3.set_title('Rainfall Distribution by Day', fontsize=14, weight='bold')
-                st.pyplot(fig2)
+                st.pyplot(fig2, use_container_width=False)
             else:
                 st.info('No rainfall data for this month at the selected location.')
         # Kéo dài trang cho đẹp
@@ -434,21 +434,185 @@ elif section == "Daily Analysis":
         if existing_fields[selected_field] == 'tp':
             y_data = y_data * 1000
         fig, ax = plt.subplots(figsize=(8, 4))
-        ax.plot(df_hour['hour'], y_data, marker='o', color='b')
-        ax.set_xlabel('Hour')
-        ax.set_ylabel(selected_field + (' (mm)' if existing_fields[selected_field]=='tp' else ''))
-        ax.set_title(f"{selected_field} Trend on {selected_date}")
+        ax.plot(df_hour['hour'], y_data, marker='o', color='b', linewidth=2, markersize=5)
+        ax.set_xlabel('Hour', fontsize=10)
+        ax.set_ylabel(selected_field + (' (mm)' if existing_fields[selected_field]=='tp' else ''), fontsize=10)
+        ax.set_title(f"{selected_field} Trend on {selected_date}", fontsize=12)
+        ax.tick_params(axis='both', labelsize=9)
         ax.grid(True)
         plt.xticks(df_hour['hour'])
-        st.pyplot(fig)
+        col_left, col_center, col_right = st.columns([1,3,1])
+        with col_center:
+            st.pyplot(fig, use_container_width=False)
     else:
         st.warning('No data for this location on selected date.')
 
 else:  # Weather Forecast section
     st.markdown("<h1 style='color:#22223b;'>Weather Forecast (BigQuery)</h1>", unsafe_allow_html=True)
     
-    if df.empty:
-        st.error("No forecast data available. Please check your BigQuery connection and settings.")
+
+    # Chọn trường dữ liệu dự báo
+    forecast_fields = {
+        'Mean Sea Level Pressure': 'msl',
+        'Temperature (°C)': 't2m',
+        'Precipitation (6hr)': 'tp',
+        'U Wind 10m': 'u10',
+        'V Wind 10m': 'v10',
+    }
+    
+    selected_forecast_field = st.selectbox('Select Attribute for Trend', list(forecast_fields.keys()))
+    dates = sorted(df['date'].unique())
+    selected_date = st.selectbox('Select Date', dates, format_func=lambda x: x.strftime('%Y/%m/%d'))
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        lat = st.slider('Select Latitude', min_value=float(df['latitude'].min()), max_value=float(df['latitude'].max()), value=float(df['latitude'].min()), step=0.25, format="%.2f")
+    with col2:
+        lon = st.slider('Select Longitude', min_value=float(df['longitude'].min()), max_value=float(df['longitude'].max()), value=float(df['longitude'].min()), step=0.25, format="%.2f")
+    
+    df_point = df[(df['latitude'] == lat) & (df['longitude'] == lon) & (df['date'] == selected_date)]
+    
+    # Thêm phần cảnh báo thời tiết cho nuôi trồng thủy sản
+    st.markdown("### 🐟 Cảnh báo thời tiết cho nuôi trồng thủy sản")
+    
+    # Lấy dữ liệu cho ngày được chọn
+    temp_data = df_point[df_point['t2m'].notna()]
+    precip_data = df_point[df_point['tp'].notna()]
+    wind_data = df_point[(df_point['u10'].notna()) & (df_point['v10'].notna())]
+    
+    if not temp_data.empty:
+        min_temp = temp_data['t2m'].min()
+        max_temp = temp_data['t2m'].max()
+        
+        # Hiển thị thông tin nhiệt độ
+        st.metric("Nhiệt độ dự báo", f"{min_temp:.1f}°C - {max_temp:.1f}°C")
+        
+        # Cảnh báo dựa trên ngưỡng nhiệt độ
+        if min_temp < 16:
+            st.error("⚠️ Cảnh báo: Nhiệt độ có thể xuống dưới 16°C - nguy hiểm cho thủy sản!")
+            st.markdown("""
+            **Khuyến nghị:**
+            - Tăng độ sâu ao nuôi lên ít nhất 2m
+            - Che phủ ao bằng bạt hoặc lưới
+            - Giảm 50% lượng thức ăn
+            - Theo dõi sức khỏe thủy sản mỗi 4 giờ
+            - Chuẩn bị hệ thống sưởi dự phòng
+            """)
+        elif min_temp < 20:
+            st.warning("⚠️ Lưu ý: Nhiệt độ có thể xuống dưới 20°C - cần theo dõi chặt chẽ")
+            st.markdown("""
+            **Khuyến nghị:**
+            - Theo dõi nhiệt độ nước mỗi 6 giờ
+            - Chuẩn bị phương án che phủ ao
+            - Giảm 30% lượng thức ăn
+            - Tăng cường sục khí
+            """)
+        else:
+            st.success("✅ Nhiệt độ trong khoảng an toàn cho thủy sản")
+    
+    # Cảnh báo lượng mưa
+    if not precip_data.empty:
+        total_precip = precip_data['tp'].sum() * 1000  # Chuyển từ m sang mm
+        st.metric("Lượng mưa dự báo", f"{total_precip:.1f} mm")
+        
+        if total_precip > 100:
+            st.error("⚠️ Cảnh báo: Lượng mưa rất lớn (>100mm) - nguy hiểm cho ao nuôi")
+            st.markdown("""
+            **Khuyến nghị:**
+            - Kiểm tra và nâng cấp hệ thống thoát nước
+            - Đo pH nước mỗi 4 giờ (duy trì 6.5-8.5)
+            - Ngừng cho ăn trong ngày mưa
+            - Tăng cường sục khí
+            - Theo dõi nồng độ oxy mỗi 2 giờ
+            - Chuẩn bị vôi để điều chỉnh pH
+            """)
+        elif total_precip > 50:
+            st.warning("⚠️ Cảnh báo: Lượng mưa lớn có thể ảnh hưởng đến ao nuôi")
+            st.markdown("""
+            **Khuyến nghị:**
+            - Kiểm tra hệ thống thoát nước
+            - Đo pH nước mỗi 6 giờ
+            - Giảm 50% lượng thức ăn
+            - Tăng cường sục khí
+            - Theo dõi nồng độ oxy mỗi 4 giờ
+            """)
+    
+    # Cảnh báo gió
+    if not wind_data.empty:
+        wind_speeds = np.sqrt(wind_data['u10']**2 + wind_data['v10']**2)
+        max_wind = wind_speeds.max()
+        st.metric("Tốc độ gió tối đa dự báo", f"{max_wind:.1f} m/s")
+        
+        if max_wind > 15:
+            st.error("⚠️ Cảnh báo: Gió rất mạnh (>15 m/s) - nguy hiểm cho ao nuôi")
+            st.markdown("""
+            **Khuyến nghị:**
+            - Cố định tất cả thiết bị trên ao
+            - Che chắn ao bằng lưới chắn gió
+            - Ngừng cho ăn trong thời gian gió mạnh
+            - Tăng cường theo dõi chất lượng nước mỗi 4 giờ
+            - Chuẩn bị máy phát điện dự phòng
+            """)
+        elif max_wind > 10:
+            st.warning("⚠️ Cảnh báo: Gió mạnh có thể ảnh hưởng đến ao nuôi")
+            st.markdown("""
+            **Khuyến nghị:**
+            - Cố định các thiết bị trên ao
+            - Che chắn ao để tránh bụi và vật lạ
+            - Giảm 50% lượng thức ăn
+            - Tăng cường theo dõi chất lượng nước mỗi 6 giờ
+            """)
+    
+    # Cảnh báo áp suất khí quyển
+    if 'msl' in df_point.columns and df_point['msl'].notna().any():
+        pressure_data = df_point[df_point['msl'].notna()]
+        min_pressure = pressure_data['msl'].min() / 100  # Chuyển từ Pa sang hPa
+        max_pressure = pressure_data['msl'].max() / 100
+        
+        st.metric("Áp suất khí quyển dự báo", f"{min_pressure:.1f} - {max_pressure:.1f} hPa")
+        
+        if min_pressure < 990:
+            st.error("⚠️ Cảnh báo: Áp suất khí quyển rất thấp (<990 hPa) - nguy hiểm cho thủy sản")
+            st.markdown("""
+            **Khuyến nghị:**
+            - Tăng cường sục khí 24/24
+            - Theo dõi nồng độ oxy mỗi 2 giờ
+            - Giảm 70% mật độ nuôi tạm thời
+            - Ngừng cho ăn
+            - Chuẩn bị máy phát điện dự phòng
+            """)
+        elif min_pressure < 1000:
+            st.warning("⚠️ Lưu ý: Áp suất khí quyển thấp có thể ảnh hưởng đến sức khỏe thủy sản")
+            st.markdown("""
+            **Khuyến nghị:**
+            - Tăng cường sục khí
+            - Theo dõi nồng độ oxy mỗi 4 giờ
+            - Giảm 50% mật độ nuôi tạm thời
+            - Giảm 50% lượng thức ăn
+            """)
+    
+    st.markdown(f"**{selected_forecast_field} Trend (Hourly)**")
+    
+    if not df_point.empty:
+        if 'level' in df_point.columns:
+            min_level = df_point['level'].min()
+            df_point = df_point[df_point['level'] == min_level]
+        
+        df_hour = df_point.groupby('hour')[forecast_fields[selected_forecast_field]].mean().reset_index()
+        y_data = df_hour[forecast_fields[selected_forecast_field]]
+        
+        fig2, ax2 = plt.subplots(figsize=(8, 4))
+        ax2.plot(df_hour['hour'], y_data, marker='o', color='b', linewidth=2, markersize=5)
+        ax2.set_xlabel('Hour', fontsize=10)
+        ax2.set_ylabel(selected_forecast_field, fontsize=10)
+        ax2.set_title(f"{selected_forecast_field} Trend on {selected_date}", fontsize=12)
+        ax2.tick_params(axis='both', labelsize=9)
+        ax2.grid(True)
+        plt.xticks(df_hour['hour'])
+        col_left, col_center, col_right = st.columns([1,3,1])
+        with col_center:
+            st.pyplot(fig2, use_container_width=False)
+
     else:
         # Chọn trường dữ liệu dự báo
         forecast_fields = {
