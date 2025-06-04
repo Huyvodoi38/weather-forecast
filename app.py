@@ -8,8 +8,10 @@ import locale
 import calendar
 from google.cloud import bigquery
 from google.oauth2 import service_account
+from weather_utils.regions import AQUACULTURE_REGIONS
+from weather_utils.forecast_display import display_region_forecast
 
-st.set_page_config(layout="wide")
+st.set_page_config(layout="wide", page_title="Weather Analysis & Aquaculture Forecast")
 
 # Set Vietnamese locale
 try:
@@ -24,14 +26,12 @@ except:
 HISTORICAL_CSV_PATH = r"./output_from_grib (6).csv"
 
 # BigQuery configuration
-# Thay đổi các thông tin sau theo project của bạn
-# silicon-stock-452315-h4.weather_forecast.weather-forecasts
 BIGQUERY_PROJECT_ID = "silicon-stock-452315-h4"
 BIGQUERY_DATASET_ID = "weather_forecast"
 BIGQUERY_TABLE_ID = "weather-forecast"
 BIGQUERY_CREDENTIALS_PATH = "./silicon-stock-452315-h4-7d9ea6110a14.json"  
 
-# Custom CSS for sidebar
+# Enhanced CSS
 st.markdown("""
     <style>
     .sidebar .sidebar-content {
@@ -53,6 +53,69 @@ st.markdown("""
     .sidebar-section:last-child {
         border-bottom: none;
     }
+    
+    /* Region cards styling */
+    .region-card {
+        background: linear-gradient(135deg, var(--card-color) 0%, var(--card-color-light) 100%);
+        border-radius: 15px;
+        padding: 20px;
+        margin: 10px;
+        box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+        transition: transform 0.3s ease, box-shadow 0.3s ease;
+        cursor: pointer;
+        border: 2px solid transparent;
+        color: white;
+        text-align: center;
+    }
+    .region-card:hover {
+        transform: translateY(-5px);
+        box-shadow: 0 8px 25px rgba(0,0,0,0.2);
+        border-color: white;
+    }
+    .region-icon {
+        font-size: 48px;
+        margin-bottom: 10px;
+        display: block;
+    }
+    .region-name {
+        font-size: 20px;
+        font-weight: bold;
+        margin-bottom: 8px;
+    }
+    .region-coords {
+        font-size: 14px;
+        opacity: 0.9;
+        margin-bottom: 10px;
+    }
+    .region-species {
+        font-size: 12px;
+        opacity: 0.8;
+        line-height: 1.4;
+    }
+    
+    /* Warning boxes */
+    .warning-box {
+        background: #fff3cd;
+        border: 1px solid #ffeaa7;
+        border-radius: 8px;
+        padding: 15px;
+        margin: 10px 0;
+    }
+    .danger-box {
+        background: #f8d7da;
+        border: 1px solid #f5c6cb;
+        border-radius: 8px;
+        padding: 15px;
+        margin: 10px 0;
+    }
+    .success-box {
+        background: #d4edda;
+        border: 1px solid #c3e6cb;
+        border-radius: 8px;
+        padding: 15px;
+        margin: 10px 0;
+    }
+    
     /* Custom radio button style */
     div[data-baseweb="radio"] > div {
         padding: 8px 16px;
@@ -69,11 +132,9 @@ st.markdown("""
         color: #22223b;
         padding-left: 6px;
     }
-    /* Custom checked color */
     div[data-baseweb="radio"] input[type="radio"]:checked + div {
         background: linear-gradient(90deg, #4ea8de 0%, #48bfe3 100%);
     }
-    /* Custom radio dot color */
     div[data-baseweb="radio"] input[type="radio"]:checked {
         accent-color: #4ea8de;
     }
@@ -98,16 +159,17 @@ with st.sidebar:
     # Add some spacing
     st.markdown("<br>", unsafe_allow_html=True)
     
-    # Add information section
-    st.markdown('<div class="sidebar-section">', unsafe_allow_html=True)
-    st.markdown("### About")
-    st.markdown("""
-    This application provides comprehensive weather data analysis and forecasting tools.
-    - Historical data analysis
-    - Weather forecasting (BigQuery)
-    - Interactive visualizations
-    """)
-    st.markdown('</div>', unsafe_allow_html=True)
+    # # Add information section
+    # st.markdown('<div class="sidebar-section">', unsafe_allow_html=True)
+    # st.markdown("### About")
+    # st.markdown("""
+    # This application provides comprehensive weather data analysis and forecasting tools for aquaculture.
+    # - Historical data analysis
+    # - Weather forecasting (BigQuery)
+    # - Aquaculture region monitoring
+    # - Interactive visualizations
+    # """)
+    # st.markdown('</div>', unsafe_allow_html=True)
 
 # Initialize BigQuery client
 @st.cache_resource
@@ -144,18 +206,16 @@ def load_historical_data():
     return df
 
 # Đọc dữ liệu dự báo từ BigQuery
-# Đọc dữ liệu dự báo từ BigQuery
 @st.cache_data
 def load_forecast_data_from_bigquery():
     """Load forecast data from BigQuery with deduplication by max ID"""
-    client = bigquery.Client.from_service_account_json(BIGQUERY_CREDENTIALS_PATH)
-    if client is None:
-        st.error("Cannot connect to BigQuery. Please check your credentials.")
-        return pd.DataFrame()
-    
     try:
+        client = bigquery.Client.from_service_account_json(BIGQUERY_CREDENTIALS_PATH)
+        if client is None:
+            st.error("Cannot connect to BigQuery. Please check your credentials.")
+            return pd.DataFrame()
+        
         # Query với window function để lấy bản ghi có ID lớn nhất cho mỗi combination của time, lat, lon
-        # Sửa lỗi: không thể PARTITION BY với FLOAT64, nên sử dụng CONCAT để tạo string key
         query = f"""
         WITH ranked_data AS (
             SELECT 
@@ -165,7 +225,7 @@ def load_forecast_data_from_bigquery():
                     ORDER BY id DESC
                 ) as rn
             FROM `{BIGQUERY_PROJECT_ID}.{BIGQUERY_DATASET_ID}.{BIGQUERY_TABLE_ID}`
-            WHERE DATE(time) >= '2025-05-25' 
+            WHERE DATE(time) >= '2025-05-21' 
             AND DATE(time) <= '2025-06-04'
         )
         SELECT 
@@ -189,9 +249,6 @@ def load_forecast_data_from_bigquery():
             st.warning("No forecast data found in BigQuery for the period 2025-05-25 to 2025-06-04.")
             return pd.DataFrame()
         
-        # Log deduplication info
-        st.sidebar.info(f"Loaded {len(df)} records after deduplication (ID-based)")
-        
         # Rename columns to match historical data format
         df = df.rename(columns={
             'temperature_2m': 't2m',
@@ -212,35 +269,81 @@ def load_forecast_data_from_bigquery():
         if 't2m' in df.columns:
             # Check if temperature is in Kelvin (> 200) or Celsius
             if df['t2m'].mean() > 200:
-                df['t2m'] = df['t2m'] - 273.15 + 6
+                df['t2m'] = df['t2m'] - 273.15 + 10
         
         return df
         
     except Exception as e:
         st.error(f"Error loading data from BigQuery: {e}")
         return pd.DataFrame()
-# Configuration section in sidebar for BigQuery
+
+# Main content based on selected section
 if section == "Weather Forecast":
-    with st.sidebar:
-        st.markdown('<div class="sidebar-section">', unsafe_allow_html=True)
-        st.markdown("### BigQuery Settings")
-        
-        # Allow users to input BigQuery settings
-        project_id = st.text_input("Project ID", value=BIGQUERY_PROJECT_ID)
-        dataset_id = st.text_input("Dataset ID", value=BIGQUERY_DATASET_ID)
-        table_id = st.text_input("Table ID", value=BIGQUERY_TABLE_ID)
-        
-        # Display data period info
-        st.info("📅 Forecast Period: 2025-05-25 to 2025-06-04")
-        st.info("🔄 Auto-deduplication by max ID")
-        
-        if st.button("Update BigQuery Settings"):
-            BIGQUERY_PROJECT_ID = project_id
-            BIGQUERY_DATASET_ID = dataset_id
-            BIGQUERY_TABLE_ID = table_id
-            st.success("Settings updated!")
-        
-        st.markdown('</div>', unsafe_allow_html=True)
+    # with st.sidebar:
+    #     st.markdown('<div class="sidebar-section">', unsafe_allow_html=True)
+    #     st.markdown("### BigQuery Settings")
+    #     project_id = st.text_input("Project ID", value=BIGQUERY_PROJECT_ID)
+    #     dataset_id = st.text_input("Dataset ID", value=BIGQUERY_DATASET_ID)
+    #     table_id = st.text_input("Table ID", value=BIGQUERY_TABLE_ID)
+    #     st.info("📅 Forecast Period: 2025-05-25 to 2025-06-04")
+    #     st.info("🔄 Auto-deduplication by max ID")
+    #     if st.button("Update BigQuery Settings"):
+    #         BIGQUERY_PROJECT_ID = project_id
+    #         BIGQUERY_DATASET_ID = dataset_id
+    #         BIGQUERY_TABLE_ID = table_id
+    #         st.success("Settings updated!")
+    #     st.markdown('</div>', unsafe_allow_html=True)
+
+    st.markdown("<h1 style='color:#22223b; text-align: center;'>🌊 Dự báo thời tiết cho khu vực nuôi trồng thủy sản</h1>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align: center; font-size: 18px; color: #666; margin-bottom: 30px;'>Chọn khu vực để xem dự báo thời tiết và cảnh báo chuyên biệt</p>", unsafe_allow_html=True)
+
+    if 'selected_region' not in st.session_state:
+        st.session_state.selected_region = None
+
+    if st.session_state.selected_region is None:
+        cols = st.columns(3)
+        for i, (region_name, region_data) in enumerate(AQUACULTURE_REGIONS.items()):
+            with cols[i]:
+                card_html = f"""
+                <div class=\"region-card\" style=\"--card-color: {region_data['color']}; --card-color-light: {region_data['color']}40;\" 
+                     onclick=\"document.getElementById('region_{i}').click();\">
+                    <span class=\"region-icon\">{region_data['icon']}</span>
+                    <div class=\"region-name\">{region_name}</div>
+                    <div class=\"region-coords\">📍 {region_data['lat']:.2f}°N, {region_data['lon']:.2f}°E</div>
+                    <div class=\"region-species\">
+                        <strong>Loài chính:</strong><br>
+                        {', '.join(region_data['main_species'][:3])}
+                        {f" và {len(region_data['main_species'])-3} loài khác" if len(region_data['main_species']) > 3 else ""}
+                    </div>
+                </div>
+                """
+                st.markdown(card_html, unsafe_allow_html=True)
+                if st.button(f"Chọn {region_name}", key=f"region_{i}", help=f"Xem dự báo cho {region_name}"):
+                    st.session_state.selected_region = region_name
+                    st.rerun()
+    else:
+        col1, col2 = st.columns([1, 6])
+        with col1:
+            if st.button("⬅️ Quay lại", key="back_to_regions"):
+                st.session_state.selected_region = None
+                st.rerun()
+        with col2:
+            st.markdown(f"<h2 style='color: {AQUACULTURE_REGIONS[st.session_state.selected_region]['color']};'>Dự báo chi tiết</h2>", unsafe_allow_html=True)
+        df = load_forecast_data_from_bigquery()
+        if not df.empty:
+            region = AQUACULTURE_REGIONS[st.session_state.selected_region]
+            # Làm tròn tọa độ để so sánh
+            df['lat_round'] = df['latitude'].round(2)
+            df['lon_round'] = df['longitude'].round(2)
+            lat = round(region['lat'], 2)
+            lon = round(region['lon'], 2)
+            region_data = df[(df['lat_round'] == lat) & (df['lon_round'] == lon)]
+            available_dates = sorted(region_data['date'].unique())
+            selected_date = st.selectbox('Chọn ngày dự báo', available_dates, format_func=lambda x: x.strftime('%Y/%m/%d'))
+            region_data_day = region_data[region_data['date'] == selected_date]
+            display_region_forecast(st.session_state.selected_region, region_data_day)
+        else:
+            st.warning("Không có dữ liệu dự báo cho khu vực này.")
 
 # Load data based on section
 if section in ["Yearly Analysis", "Monthly Analysis", "Daily Analysis"]:
@@ -251,7 +354,7 @@ if section in ["Yearly Analysis", "Monthly Analysis", "Daily Analysis"]:
     else:
         st.error("Cannot load historical data.")
         st.stop()
-else:
+elif section == "Weather Forecast":
     # Load forecast data from BigQuery
     df = load_forecast_data_from_bigquery()
     if df.empty:
@@ -448,7 +551,7 @@ elif section == "Daily Analysis":
         st.warning('No data for this location on selected date.')
 
 else:  # Weather Forecast section
-    st.markdown("<h1 style='color:#22223b;'>Weather Forecast (BigQuery)</h1>", unsafe_allow_html=True)
+    st.markdown("<h1 style='color:#22223b;'> Dự đoán các đặc trưng thời tiết </h1>", unsafe_allow_html=True)
     
 
     # Chọn trường dữ liệu dự báo
@@ -471,125 +574,6 @@ else:  # Weather Forecast section
         lon = st.slider('Select Longitude', min_value=float(df['longitude'].min()), max_value=float(df['longitude'].max()), value=float(df['longitude'].min()), step=0.25, format="%.2f")
     
     df_point = df[(df['latitude'] == lat) & (df['longitude'] == lon) & (df['date'] == selected_date)]
-    
-    # Thêm phần cảnh báo thời tiết cho nuôi trồng thủy sản
-    st.markdown("### 🐟 Cảnh báo thời tiết cho nuôi trồng thủy sản")
-    
-    # Lấy dữ liệu cho ngày được chọn
-    temp_data = df_point[df_point['t2m'].notna()]
-    precip_data = df_point[df_point['tp'].notna()]
-    wind_data = df_point[(df_point['u10'].notna()) & (df_point['v10'].notna())]
-    
-    if not temp_data.empty:
-        min_temp = temp_data['t2m'].min()
-        max_temp = temp_data['t2m'].max()
-        
-        # Hiển thị thông tin nhiệt độ
-        st.metric("Nhiệt độ dự báo", f"{min_temp:.1f}°C - {max_temp:.1f}°C")
-        
-        # Cảnh báo dựa trên ngưỡng nhiệt độ
-        if min_temp < 16:
-            st.error("⚠️ Cảnh báo: Nhiệt độ có thể xuống dưới 16°C - nguy hiểm cho thủy sản!")
-            st.markdown("""
-            **Khuyến nghị:**
-            - Tăng độ sâu ao nuôi lên ít nhất 2m
-            - Che phủ ao bằng bạt hoặc lưới
-            - Giảm 50% lượng thức ăn
-            - Theo dõi sức khỏe thủy sản mỗi 4 giờ
-            - Chuẩn bị hệ thống sưởi dự phòng
-            """)
-        elif min_temp < 20:
-            st.warning("⚠️ Lưu ý: Nhiệt độ có thể xuống dưới 20°C - cần theo dõi chặt chẽ")
-            st.markdown("""
-            **Khuyến nghị:**
-            - Theo dõi nhiệt độ nước mỗi 6 giờ
-            - Chuẩn bị phương án che phủ ao
-            - Giảm 30% lượng thức ăn
-            - Tăng cường sục khí
-            """)
-        else:
-            st.success("✅ Nhiệt độ trong khoảng an toàn cho thủy sản")
-    
-    # Cảnh báo lượng mưa
-    if not precip_data.empty:
-        total_precip = precip_data['tp'].sum() * 1000  # Chuyển từ m sang mm
-        st.metric("Lượng mưa dự báo", f"{total_precip:.1f} mm")
-        
-        if total_precip > 100:
-            st.error("⚠️ Cảnh báo: Lượng mưa rất lớn (>100mm) - nguy hiểm cho ao nuôi")
-            st.markdown("""
-            **Khuyến nghị:**
-            - Kiểm tra và nâng cấp hệ thống thoát nước
-            - Đo pH nước mỗi 4 giờ (duy trì 6.5-8.5)
-            - Ngừng cho ăn trong ngày mưa
-            - Tăng cường sục khí
-            - Theo dõi nồng độ oxy mỗi 2 giờ
-            - Chuẩn bị vôi để điều chỉnh pH
-            """)
-        elif total_precip > 50:
-            st.warning("⚠️ Cảnh báo: Lượng mưa lớn có thể ảnh hưởng đến ao nuôi")
-            st.markdown("""
-            **Khuyến nghị:**
-            - Kiểm tra hệ thống thoát nước
-            - Đo pH nước mỗi 6 giờ
-            - Giảm 50% lượng thức ăn
-            - Tăng cường sục khí
-            - Theo dõi nồng độ oxy mỗi 4 giờ
-            """)
-    
-    # Cảnh báo gió
-    if not wind_data.empty:
-        wind_speeds = np.sqrt(wind_data['u10']**2 + wind_data['v10']**2)
-        max_wind = wind_speeds.max()
-        st.metric("Tốc độ gió tối đa dự báo", f"{max_wind:.1f} m/s")
-        
-        if max_wind > 15:
-            st.error("⚠️ Cảnh báo: Gió rất mạnh (>15 m/s) - nguy hiểm cho ao nuôi")
-            st.markdown("""
-            **Khuyến nghị:**
-            - Cố định tất cả thiết bị trên ao
-            - Che chắn ao bằng lưới chắn gió
-            - Ngừng cho ăn trong thời gian gió mạnh
-            - Tăng cường theo dõi chất lượng nước mỗi 4 giờ
-            - Chuẩn bị máy phát điện dự phòng
-            """)
-        elif max_wind > 10:
-            st.warning("⚠️ Cảnh báo: Gió mạnh có thể ảnh hưởng đến ao nuôi")
-            st.markdown("""
-            **Khuyến nghị:**
-            - Cố định các thiết bị trên ao
-            - Che chắn ao để tránh bụi và vật lạ
-            - Giảm 50% lượng thức ăn
-            - Tăng cường theo dõi chất lượng nước mỗi 6 giờ
-            """)
-    
-    # Cảnh báo áp suất khí quyển
-    if 'msl' in df_point.columns and df_point['msl'].notna().any():
-        pressure_data = df_point[df_point['msl'].notna()]
-        min_pressure = pressure_data['msl'].min() / 100  # Chuyển từ Pa sang hPa
-        max_pressure = pressure_data['msl'].max() / 100
-        
-        st.metric("Áp suất khí quyển dự báo", f"{min_pressure:.1f} - {max_pressure:.1f} hPa")
-        
-        if min_pressure < 990:
-            st.error("⚠️ Cảnh báo: Áp suất khí quyển rất thấp (<990 hPa) - nguy hiểm cho thủy sản")
-            st.markdown("""
-            **Khuyến nghị:**
-            - Tăng cường sục khí 24/24
-            - Theo dõi nồng độ oxy mỗi 2 giờ
-            - Giảm 70% mật độ nuôi tạm thời
-            - Ngừng cho ăn
-            - Chuẩn bị máy phát điện dự phòng
-            """)
-        elif min_pressure < 1000:
-            st.warning("⚠️ Lưu ý: Áp suất khí quyển thấp có thể ảnh hưởng đến sức khỏe thủy sản")
-            st.markdown("""
-            **Khuyến nghị:**
-            - Tăng cường sục khí
-            - Theo dõi nồng độ oxy mỗi 4 giờ
-            - Giảm 50% mật độ nuôi tạm thời
-            - Giảm 50% lượng thức ăn
-            """)
     
     st.markdown(f"**{selected_forecast_field} Trend (Hourly)**")
     
